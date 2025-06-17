@@ -17,6 +17,7 @@
 import ballerina/http;
 import ballerina/io;
 import ballerinax/health.base.auth;
+import ballerina/time;
 
 # Represents FHIR client connector configurations
 #
@@ -89,10 +90,19 @@ public type FHIRConnectorConfig record {|
 # Configs of the file server where bulk export files will be stored
 #
 # + fileServerUrl - Bulk export file server base url
+# + defaultIntervalInSec - Default interval in seconds to poll the file server for new files
+# + targetDirectory - Target directory in the file server to store the bulk export files
+# + targetServerConfig - Target server configurations to connect to the file server
 public type BulkFileServerConfig record {|
     *http:ClientConfiguration;
     @display {label: "Bulk export file server base url"}
     string fileServerUrl;
+    @display {label: "Bulk export interval in seconds"}
+    decimal? defaultIntervalInSec;
+    @display {label: "Bulk export file server target directory"}
+    string? targetDirectory;
+    @display {label: "Bulk export target server configurations"}
+    TargetServerConfig targetServerConfig;
 |};
 
 # Represents a success response coming from the fhir server side
@@ -250,3 +260,83 @@ type Pagination record {|
     string previous?;
     string self?;
 |};
+
+// type BulkExportServerConfig record {|
+//     string baseUrl;
+//     string tokenUrl;
+//     string clientId;
+//     string clientSecret;
+//     string[] scopes;
+//     string fileServerUrl;
+//     string contextPath;
+//     decimal defaultIntervalInSec;
+// |};
+
+# Description.
+#
+# + 'type - Type of the target server, e.g., "sftp", "ftp", etc.
+# + host - Hostname or IP address of the target server
+# + port - Port number to connect to the target server
+# + username - Username for authentication with the target server
+# + password - Password for authentication with the target server
+# + directory - Directory on the target server where files will be stored
+public type TargetServerConfig record {|
+    string 'type;
+    string host;
+    int port;
+    string username;
+    string password;
+    string directory;
+|};
+
+// type BulkExportClientConfig record {|
+//     int port;
+//     boolean authEnabled;
+//     string targetDirectory;
+// |};
+
+type OutputFile record {|
+    string 'type;
+    string url;
+    int count;
+|};
+
+type ExportSummary record {
+    string transactionTime;
+    string request;
+    boolean requiresAccessToken;
+    OutputFile[] output;
+    string[] deleted;
+    string[] 'error;
+};
+
+type MatchedPatient record {|
+    string id;
+    string canonical?;
+    map<string> identifiers?;
+|};
+
+type PollingEvent record {|
+    string id;
+    string eventStatus;
+    string exportStatus?;
+    string progress?;
+|};
+
+type ExportTask record {|
+    string id;
+    time:Utc lastUpdated?;
+    string lastStatus;
+    PollingEvent[] pollingEvents;
+|};
+
+type getExportTask function (string exportId) returns ExportTask;
+
+type getPollingEvents function (string exportId) returns [PollingEvent];
+
+type addExportTask isolated function (map<ExportTask> taskMap, ExportTask exportTask) returns boolean;
+
+type addPollingEvent isolated function (map<ExportTask> taskMap, PollingEvent pollingEvent) returns boolean;
+
+type updateExportTaskStatus function (map<ExportTask> taskMap, string exportTaskId, string newStatus) returns boolean;
+

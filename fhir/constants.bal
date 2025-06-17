@@ -290,3 +290,7 @@ const PREVIOUS = "previous";
 const PREV = "prev";
 const SELF = "self";
 
+# default values
+const DEFAULT_POLLING_INTERVAL = 1.0d;
+const DEFAULT_EXPORT_DIRECTORY = "/export_directory";
+

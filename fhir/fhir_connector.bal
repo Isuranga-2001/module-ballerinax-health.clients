@@ -13,10 +13,10 @@
 // KIND, either express or implied.  See the License for the
 // specific language governing permissions and limitations
 // under the License.
-
 import ballerina/http;
 import ballerinax/health.base.auth;
 import ballerina/log;
+import ballerina/uuid;
 
 # This connector allows you to connect and interact with any FHIR server
 @display {label: "FHIR Client Connector"}
@@ -46,12 +46,21 @@ public isolated client class FHIRConnector {
     # The file server URL of the FHIR server
     private final string? fileServerUrl;
 
+    # The default interval in seconds for polling operations
+    private final decimal? defaultIntervalInSec;
+
+    # The target directory for storing exported files
+    private final string? targetDirectory;
+
+    # The target server configuration for the bulk file server
+    private final TargetServerConfig? targetServerConfig;
+
     # Initializes the FHIR client connector
     #
     # + connectorConfig - FHIR connector configurations
     # + httpClientConfig - HTTP client configurations
     public function init(FHIRConnectorConfig connectorConfig) returns error? {
-        self.baseUrl = connectorConfig.baseURL.endsWith(SLASH) 
+        self.baseUrl = connectorConfig.baseURL.endsWith(SLASH)
             ? connectorConfig.baseURL.substring(0, connectorConfig.baseURL.length() - 1) 
             : connectorConfig.baseURL;
         self.urlRewrite = connectorConfig.urlRewrite;
@@ -73,9 +82,15 @@ public isolated client class FHIRConnector {
             // initialize bulk file server http client
             self.bulkFileHttpClient = check new (bulkFileServerConfig.fileServerUrl, constructHttpConfigs(bulkFileServerConfig));
             self.fileServerUrl = bulkFileServerConfig.fileServerUrl;
+            self.defaultIntervalInSec = bulkFileServerConfig.defaultIntervalInSec ?: DEFAULT_POLLING_INTERVAL;
+            self.targetDirectory = bulkFileServerConfig.targetDirectory ?: DEFAULT_EXPORT_DIRECTORY;
+            self.targetServerConfig = bulkFileServerConfig.targetServerConfig.clone();
         } else {
             self.bulkFileHttpClient = self.httpClient;
             self.fileServerUrl = ();
+            self.defaultIntervalInSec = ();
+            self.targetDirectory = ();
+            self.targetServerConfig = ();
         }
         if connectorConfig.urlRewrite && connectorConfig.replacementURL == () {
             log:printError(string `${FHIR_CONNECTOR_ERROR}: ${REPLACEMENT_URL_NOT_PROVIDED}`);
@@ -729,15 +744,61 @@ public isolated client class FHIRConnector {
                 [ACCEPT_HEADER] : FHIR_JSON,
                 [PREFER_HEADER] : "respond-async"
             };
-            log:printDebug(string `Request URL: ${requestUrl}`);
-            http:Response response = check self.httpClient->get(requestUrl, check enrichHeaders(headerMap, self.pkjwtHanlder));
-            FHIRResponse result = check getBulkExportResponse(response);
-            if self.urlRewrite {
-                return rewriteServerUrl(result, self.baseUrl, self.fileServerUrl, self.replacementURL);
+            
+            // update config for status polling
+            // initialize the status polling
+            addExportTask addTaskFunction = addExportTasktoMemory;
+            string taskId = uuid:createType1AsString();
+            boolean isSuccess = false;
+            http:Response|http:ClientError status;
+
+            log:printInfo("Bulk exporting started. Sending Kick-off request.");
+
+            lock {
+                ExportTask exportTask = {id: taskId, lastStatus: "in-progress", pollingEvents: []};
+                isSuccess = addTaskFunction(exportTasks, exportTask);
             }
-            return result;
+
+            // kick-off request to the bulk export server
+            log:printDebug(string `Request URL: ${requestUrl}`);
+            status = check self.httpClient->get(requestUrl, check enrichHeaders(headerMap, self.pkjwtHanlder));
+
+            decimal intervalInSec;
+            string targetDir;
+            TargetServerConfig targetConfig;
+            lock {
+                intervalInSec = <decimal>self.defaultIntervalInSec;
+                targetDir = <string>self.targetDirectory;
+                targetConfig = <TargetServerConfig>self.targetServerConfig.clone();
+            }
+            submitBackgroundJob(taskId, status, intervalInSec, targetDir, targetConfig);
+
+            if isSuccess {
+                log:printInfo("Export task persisted.", exportId = taskId);
+
+                if status is http:Response {
+                    FHIRResponse result = check getBulkExportResponse(status);
+                    if self.urlRewrite {
+                        return rewriteServerUrl(result, self.baseUrl, self.fileServerUrl, self.replacementURL);
+                    }
+                    return result;
+                } else {
+                    log:printError("Error occurred while adding the export task to the memory.");
+                    return error(string `${FHIR_CONNECTOR_ERROR}: ${status.message()}`, errorDetails = status);
+                }
+
+            } else {
+                log:printError("Error occurred while adding the export task to the memory.");
+                return error(string `${FHIR_CONNECTOR_ERROR}: Error occurred while adding the export task to the memory.`);
+            }
+
+            // FHIRResponse result = check getBulkExportResponse(status);
+            // if self.urlRewrite {
+            //     return rewriteServerUrl(result, self.baseUrl, self.fileServerUrl, self.replacementURL);
+            // }
+            // return result;
         } on fail error e {
-            log:printError(string `${FHIR_CONNECTOR_ERROR}: ${e.message()}`,  e);
+            log:printError(string `${FHIR_CONNECTOR_ERROR}: ${e.message()}`, e);
             if e is FHIRError {
                 return e;
             }
